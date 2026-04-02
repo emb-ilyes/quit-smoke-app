@@ -1,20 +1,13 @@
 {
   "expo": {
-    "name": "QuitSmoke",
+    "name": "QuitFlow",
     "slug": "quit-smoke-app",
-    "version": "1.0.0",
+    "version": "2.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
-    "backgroundColor": "#020205",
-    "splash": {
-      "backgroundColor": "#020205",
-      "resizeMode": "contain"
-    },
+    "backgroundColor": "#0f0c1a",
     "android": {
-      "package": "com.yourname.quitsmoke",
-      "adaptiveIcon": {
-        "backgroundColor": "#020205"
-      }
+      "package": "com.yourname.quitflow"
     }
   }
 }
