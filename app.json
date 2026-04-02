@@ -6,6 +6,10 @@
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
     "backgroundColor": "#020205",
+    "splash": {
+      "backgroundColor": "#020205",
+      "resizeMode": "contain"
+    },
     "android": {
       "package": "com.yourname.quitsmoke",
       "adaptiveIcon": {
