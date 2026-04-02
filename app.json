@@ -5,15 +5,12 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
+    "backgroundColor": "#020205",
     "android": {
       "package": "com.yourname.quitsmoke",
       "adaptiveIcon": {
         "backgroundColor": "#020205"
       }
-    },
-    "ios": {
-      "supportsTablet": true
     }
   }
 }
-
