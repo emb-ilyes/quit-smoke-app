@@ -2,6 +2,7 @@ name: Build Android APK
 on:
   push:
     branches: [ main ]
+  workflow_dispatch: # This allows you to start the build manually from the Actions tab
 
 jobs:
   build:
@@ -27,7 +28,7 @@ jobs:
         run: rm -rf android
 
       - name: 🔨 Build Prebuild
-        run: npx expo prebuild --platform android --no-interactive
+        run: npx expo prebuild --platform android --clean
 
       - name: 🤖 Build APK with Gradle
         run: |
@@ -39,4 +40,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: quit-smoke-apk
-          path: android/app/build/outputs/apk/release/app-release.apk
+          path: android/app/build/outputs/apk/release/*.apk
