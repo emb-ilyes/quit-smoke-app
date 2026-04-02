@@ -14,7 +14,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 18
-          # Caching is removed to prevent the "lock file not found" error
 
       - name: 🏗 Setup Expo
         uses: expo/expo-github-action@v8
@@ -24,8 +23,11 @@ jobs:
       - name: 📦 Install Dependencies
         run: npm install
 
+      - name: 🗑 Clean Old Android Folder
+        run: rm -rf android
+
       - name: 🔨 Build Prebuild
-        run: npx expo prebuild --platform android
+        run: npx expo prebuild --platform android --no-interactive
 
       - name: 🤖 Build APK with Gradle
         run: |
