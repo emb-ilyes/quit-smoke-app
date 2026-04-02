@@ -6,8 +6,15 @@
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
     "backgroundColor": "#0f0c1a",
+    "splash": {
+      "backgroundColor": "#0f0c1a",
+      "resizeMode": "contain"
+    },
     "android": {
-      "package": "com.yourname.quitflow"
+      "package": "com.yourname.quitflow",
+      "adaptiveIcon": {
+        "backgroundColor": "#0f0c1a"
+      }
     }
   }
 }
