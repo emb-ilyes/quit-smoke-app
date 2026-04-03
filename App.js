@@ -1,51 +1,133 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   StyleSheet, Text, View, TouchableOpacity, ScrollView,
   SafeAreaView, Dimensions, StatusBar, Vibration, Modal,
-  TextInput, Platform
+  Platform, Alert
 } from "react-native";
-import Svg, { Circle, Line, Rect, G, Text as SvgText, Path, Defs, LinearGradient, Stop } from "react-native-svg";
+import Svg, {
+  Circle, Line, Rect, G, Text as SvgText,
+  Path, Defs, LinearGradient, Stop
+} from "react-native-svg";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import DateTimePicker from "@react-native-community/datetimepicker";
 
 const { width: SW } = Dimensions.get("window");
-const STORAGE_KEY = "@quitflow_data_v3";
+const STORAGE_KEY = "@quitflow_data_v4";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const pad = (n) => String(n).padStart(2, "0");
-const dateKey = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-const fmtTime = (iso) => { const d = new Date(iso); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+
+const dateKey = (d) =>
+  `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+
+const fmtTime = (iso) => {
+  const d = new Date(iso);
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
+
 const fmtDayShort = (d) => d.toLocaleDateString("en-GB", { weekday: "short" });
 const fmtDateShort = (d) => `${d.getDate()}/${d.getMonth() + 1}`;
 
-// Minutes until end-of-day cutoff
-function minutesUntilEnd(endHour, endMin) {
-  const now = new Date();
-  const end = new Date();
-  end.setHours(endHour, endMin, 0, 0);
-  if (end <= now) end.setDate(end.getDate() + 1);
-  return Math.max(0, Math.floor((end - now) / 60000));
+// Returns the "logical day key" given the current time and setup.
+// The logical day starts at startHour:startMin and ends at endHour:endMin.
+// If now is between midnight and endHour:endMin, it still belongs to yesterday's logical day.
+function getLogicalDay(now, setup) {
+  const { startHour, startMin, endHour, endMin } = setup;
+
+  // Build today's start and end boundaries
+  const todayStart = new Date(now);
+  todayStart.setHours(startHour, startMin, 0, 0);
+
+  const todayEnd = new Date(now);
+  todayEnd.setHours(endHour, endMin, 0, 0);
+
+  // End can be past midnight (e.g. start=07:00, end=01:00 next day)
+  const endCrossesMidnight = endHour < startHour || (endHour === startHour && endMin < startMin);
+
+  if (endCrossesMidnight) {
+    // If we're before today's end time (i.e. early morning), we belong to yesterday
+    const yesterdayEnd = new Date(now);
+    yesterdayEnd.setHours(endHour, endMin, 0, 0);
+    if (now < yesterdayEnd) {
+      const yesterday = new Date(now);
+      yesterday.setDate(yesterday.getDate() - 1);
+      return dateKey(yesterday);
+    }
+    // If we're after today's start, we're in today's logical day
+    if (now >= todayStart) {
+      return dateKey(now);
+    }
+    // Between end and start = "dead zone" — still considered today for logging
+    return dateKey(now);
+  } else {
+    // Same-day cycle (e.g. start=07:00, end=23:00)
+    if (now >= todayStart) return dateKey(now);
+    // Before start — belongs to yesterday's logical day
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    return dateKey(yesterday);
+  }
 }
 
-// Build plan: array of { key, allowance } for each day
+// Is the current time in the "between end and next start" dead zone?
+function isInDeadZone(now, setup) {
+  const { startHour, startMin, endHour, endMin } = setup;
+  const h = now.getHours(), m = now.getMinutes();
+  const nowMins = h * 60 + m;
+  const endMins = endHour * 60 + endMin;
+  const startMins = startHour * 60 + startMin;
+
+  const endCrossesMidnight = endHour < startHour || (endHour === startHour && endMin < startMin);
+
+  if (endCrossesMidnight) {
+    // Dead zone: endMins < nowMins < startMins (same day, after end, before start)
+    // e.g. end=01:00, start=07:00: dead zone is 01:00–07:00
+    // After midnight: 0–endMins is still previous day's tail
+    return nowMins > endMins && nowMins < startMins;
+  } else {
+    // Dead zone: before start
+    return nowMins < startMins;
+  }
+}
+
+// Seconds until end-of-day cutoff
+function secondsUntilEnd(now, setup) {
+  const { endHour, endMin } = setup;
+  const end = new Date(now);
+  end.setHours(endHour, endMin, 0, 0);
+  if (end <= now) end.setDate(end.getDate() + 1);
+  return Math.max(0, Math.floor((end - now) / 1000));
+}
+
+// Format countdown as "Xh Xm Xs"
+function fmtCountdown(totalSecs) {
+  const h = Math.floor(totalSecs / 3600);
+  const m = Math.floor((totalSecs % 3600) / 60);
+  const s = totalSecs % 60;
+  if (h > 0) return `${h}h ${pad(m)}m ${pad(s)}s`;
+  if (m > 0) return `${m}m ${pad(s)}s`;
+  return `${s}s`;
+}
+
+// Build plan: { dateKey -> allowance }
 function buildPlan(startDateStr, startCigs, durationDays) {
   const plan = {};
   const interval = durationDays / startCigs;
   for (let i = 0; i < durationDays; i++) {
     const d = new Date(startDateStr);
     d.setDate(d.getDate() + i);
-    const key = dateKey(d);
-    plan[key] = Math.max(0, Math.round(startCigs - (i + 1) / interval));
+    plan[dateKey(d)] = Math.max(0, Math.round(startCigs - (i + 1) / interval));
   }
   return plan;
 }
 
 function getAllowance(plan, key, startCigs) {
   if (plan && plan[key] !== undefined) return plan[key];
-  return startCigs; // fallback before plan is set
+  return startCigs;
 }
 
-function last7Days() {
+function last7LogicalDays(setup) {
   return Array.from({ length: 7 }, (_, i) => {
     const d = new Date();
     d.setDate(d.getDate() - (6 - i));
@@ -54,15 +136,19 @@ function last7Days() {
   });
 }
 
-// ─── Main App ─────────────────────────────────────────────────────────────────
+// ─── Default setup ────────────────────────────────────────────────────────────
 
 const DEFAULT_SETUP = {
   startCigs: 20,
   durationDays: 90,
+  startHour: 7,
+  startMin: 0,
   endHour: 1,
   endMin: 0,
   startDate: dateKey(new Date()),
 };
+
+// ─── Main App ─────────────────────────────────────────────────────────────────
 
 export default function App() {
   const [logs, setLogs] = useState({});
@@ -71,14 +157,16 @@ export default function App() {
   const [view, setView] = useState("today");
   const [showSetup, setShowSetup] = useState(false);
   const [now, setNow] = useState(new Date());
+  const [lastCigTime, setLastCigTime] = useState(null); // ISO of most recent cig logged
+  const [dayChoiceVisible, setDayChoiceVisible] = useState(false);
 
-  // Tick every 30s to refresh "next cig" countdown
+  // 1-second ticker for countdown
   useEffect(() => {
-    const id = setInterval(() => setNow(new Date()), 30000);
+    const id = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(id);
   }, []);
 
-  // Load from storage
+  // Load persisted data
   useEffect(() => {
     (async () => {
       const saved = await AsyncStorage.getItem(STORAGE_KEY);
@@ -86,85 +174,127 @@ export default function App() {
         const p = JSON.parse(saved);
         if (p.logs) setLogs(p.logs);
         if (p.setup) {
-          setSetup(p.setup);
-          setPlan(buildPlan(p.setup.startDate, p.setup.startCigs, p.setup.durationDays));
+          const s = { ...DEFAULT_SETUP, ...p.setup };
+          setSetup(s);
+          setPlan(buildPlan(s.startDate, s.startCigs, s.durationDays));
         }
+        if (p.lastCigTime) setLastCigTime(p.lastCigTime);
       } else {
-        // First launch — show setup
         setShowSetup(true);
       }
     })();
   }, []);
 
-  const persist = useCallback(async (newLogs, newSetup) => {
-    const toSave = { logs: newLogs, setup: newSetup || setup };
-    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
-  }, [setup]);
+  const persist = useCallback(async (newLogs, newSetup, newLastCig) => {
+    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({
+      logs: newLogs,
+      setup: newSetup || setup,
+      lastCigTime: newLastCig !== undefined ? newLastCig : lastCigTime,
+    }));
+  }, [setup, lastCigTime]);
 
   const saveSetup = async (newSetup) => {
     const newPlan = buildPlan(newSetup.startDate, newSetup.startCigs, newSetup.durationDays);
     setSetup(newSetup);
     setPlan(newPlan);
     setShowSetup(false);
-    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ logs, setup: newSetup }));
+    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ logs, setup: newSetup, lastCigTime }));
   };
 
-  const today = dateKey(now);
-  const todayLogs = logs[today] || [];
+  // Logical day determination
+  const inDeadZone = isInDeadZone(now, setup);
+  const logicalDay = getLogicalDay(now, setup);
+
+  // If user taps "log" during dead zone → ask which day
+  const handleLogPress = () => {
+    Vibration.vibrate(50);
+    if (inDeadZone) {
+      setDayChoiceVisible(true);
+    } else {
+      doLog(logicalDay);
+    }
+  };
+
+  const doLog = (targetDayKey) => {
+    const iso = now.toISOString();
+    const newDayLogs = [...(logs[targetDayKey] || []), iso];
+    const newLogs = { ...logs, [targetDayKey]: newDayLogs };
+    setLogs(newLogs);
+    setLastCigTime(iso);
+    persist(newLogs, undefined, iso);
+  };
+
+  const removeLast = (targetDayKey) => {
+    const arr = logs[targetDayKey] || [];
+    if (!arr.length) return;
+    Vibration.vibrate(30);
+    const newArr = arr.slice(0, -1);
+    const newLogs = { ...logs, [targetDayKey]: newArr };
+    // Update lastCigTime to new last, or null
+    const newLast = newArr.length > 0 ? newArr[newArr.length - 1] : null;
+    setLogs(newLogs);
+    setLastCigTime(newLast);
+    persist(newLogs, undefined, newLast);
+  };
+
+  // Today's data
+  const todayLogs = logs[logicalDay] || [];
   const smokedToday = todayLogs.length;
-  const todayAllowance = getAllowance(plan, today, setup.startCigs);
+  const todayAllowance = getAllowance(plan, logicalDay, setup.startCigs);
   const remaining = Math.max(0, todayAllowance - smokedToday);
 
-  // Next cigarette interval
-  const minsLeft = minutesUntilEnd(setup.endHour, setup.endMin);
-  const nextCigMins = remaining > 0 ? Math.floor(minsLeft / remaining) : null;
+  // Countdown to end of day
+  const secsLeft = secondsUntilEnd(now, setup);
+  const nextCigSecs = remaining > 0 ? Math.floor((secsLeft / remaining)) : null;
 
-  // Overall plan progress
+  // Time since last cig
+  const secsSinceLastCig = lastCigTime
+    ? Math.floor((now - new Date(lastCigTime)) / 1000)
+    : null;
+
+  // Button color: red if last cig was recent (within nextCigSecs), green when elapsed
+  const cigBtnReady = lastCigTime === null ||
+    nextCigSecs === null ||
+    secsSinceLastCig >= nextCigSecs;
+  const cigBtnColor = cigBtnReady ? "#16312a" : "#2a1616";
+  const cigBtnBorder = cigBtnReady ? "#4ade80" : "#f87171";
+  const cigBtnTextColor = cigBtnReady ? "#86efac" : "#fca5a5";
+
+  // Plan progress
   const planKeys = Object.keys(plan);
-  const dayIndex = planKeys.indexOf(today);
-  const progressPct = planKeys.length > 0 ? Math.round(((dayIndex + 1) / planKeys.length) * 100) : 0;
-
-  const addCig = () => {
-    Vibration.vibrate(50);
-    const newTodayLogs = [...todayLogs, new Date().toISOString()];
-    const newLogs = { ...logs, [today]: newTodayLogs };
-    setLogs(newLogs);
-    persist(newLogs);
-  };
-
-  const removeLast = () => {
-    if (!todayLogs.length) return;
-    Vibration.vibrate(30);
-    const newTodayLogs = todayLogs.slice(0, -1);
-    const newLogs = { ...logs, [today]: newTodayLogs };
-    setLogs(newLogs);
-    persist(newLogs);
-  };
+  const dayIndex = planKeys.indexOf(logicalDay);
+  const progressPct = planKeys.length > 0
+    ? Math.max(0, Math.round(((dayIndex + 1) / planKeys.length) * 100))
+    : 0;
 
   // Status
   const isOver = smokedToday > todayAllowance;
-  const isDone = remaining === 0 && !isOver;
   let statusColor = "#a78bfa";
   let statusText = "";
   if (todayAllowance === 0 && smokedToday === 0) {
     statusColor = "#4ade80"; statusText = "🎉 Smoke-free day!";
   } else if (isOver) {
-    statusColor = "#f87171"; statusText = `⚠ ${smokedToday - todayAllowance} over limit`;
-  } else if (isDone) {
+    statusColor = "#f87171"; statusText = `⚠  ${smokedToday - todayAllowance} over limit`;
+  } else if (remaining === 0) {
     statusColor = "#4ade80"; statusText = "✅ Goal reached!";
-  } else if (nextCigMins !== null) {
-    const h = Math.floor(nextCigMins / 60), m = nextCigMins % 60;
-    statusText = `Next in ~${h > 0 ? `${h}h ` : ""}${m}m`;
-    statusColor = nextCigMins < 15 ? "#facc15" : "#a78bfa";
+  } else if (nextCigSecs !== null) {
+    statusText = `Next in ${fmtCountdown(nextCigSecs)}`;
+    statusColor = nextCigSecs < 900 ? "#facc15" : "#a78bfa";
   }
 
-  // Circle arc
+  // Circle
   const circleR = 90;
   const circleC = 2 * Math.PI * circleR;
   const circlePct = todayAllowance > 0
     ? Math.min(1, smokedToday / todayAllowance)
     : smokedToday > 0 ? 1 : 0;
   const circleOffset = circleC * (1 - circlePct);
+
+  // Yesterday key (for dead zone logging)
+  const yesterdayDate = new Date(now);
+  yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+  const yesterdayKey = dateKey(yesterdayDate);
+  const todayCalKey = dateKey(now);
 
   return (
     <SafeAreaView style={S.container}>
@@ -193,10 +323,19 @@ export default function App() {
 
         {view === "today" ? (
           <>
-            {/* Plan progress bar */}
+            {/* Dead zone banner */}
+            {inDeadZone && (
+              <View style={S.deadZoneBanner}>
+                <Text style={S.deadZoneText}>
+                  🌙 Between day end & start — log to yesterday or today
+                </Text>
+              </View>
+            )}
+
+            {/* Plan progress */}
             <View style={S.progressWrap}>
               <Text style={S.progressLabel}>
-                Day {Math.max(1, dayIndex + 1)} of {planKeys.length} · {progressPct}% complete · {setup.startCigs} → 0
+                Day {Math.max(1, dayIndex + 1)} of {planKeys.length} · {progressPct}% · {setup.startCigs}→0
               </Text>
               <View style={S.progressTrack}>
                 <View style={[S.progressFill, { width: `${progressPct}%` }]} />
@@ -206,9 +345,9 @@ export default function App() {
             {/* Circle */}
             <View style={S.circleWrap}>
               <Svg width={220} height={220} viewBox="0 0 200 200">
-                <Circle cx="100" cy="100" r={circleR} stroke="#1e1b2e" strokeWidth="15" fill="none" />
-                <Circle
-                  cx="100" cy="100" r={circleR}
+                <Circle cx="100" cy="100" r={circleR}
+                  stroke="#1e1b2e" strokeWidth="15" fill="none" />
+                <Circle cx="100" cy="100" r={circleR}
                   stroke={statusColor} strokeWidth="15" fill="none"
                   strokeDasharray={circleC}
                   strokeDashoffset={circleOffset}
@@ -223,7 +362,7 @@ export default function App() {
               </View>
             </View>
 
-            {/* Status badge */}
+            {/* Status */}
             <View style={[S.statusBadge, { borderColor: statusColor + "55" }]}>
               <Text style={[S.statusText, { color: statusColor }]}>{statusText}</Text>
             </View>
@@ -231,10 +370,8 @@ export default function App() {
             {/* Chips */}
             <View style={S.chipsRow}>
               <View style={S.chip}>
-                <Text style={S.chipVal}>
-                  {Math.floor(minsLeft / 60)}h {minsLeft % 60}m
-                </Text>
-                <Text style={S.chipLabel}>TIME LEFT</Text>
+                <Text style={S.chipVal}>{fmtCountdown(secsLeft)}</Text>
+                <Text style={S.chipLabel}>DAY ENDS</Text>
               </View>
               <View style={S.chip}>
                 <Text style={S.chipVal}>{remaining > 0 ? remaining : "Done ✓"}</Text>
@@ -242,31 +379,82 @@ export default function App() {
               </View>
             </View>
 
-            {/* Log button */}
-            <TouchableOpacity style={S.smokeBtn} onPress={addCig} activeOpacity={0.8}>
-              <Text style={S.smokeBtnText}>🚬  I JUST SMOKED ONE</Text>
+            {/* LOG BUTTON — color reflects readiness */}
+            <TouchableOpacity
+              style={[S.smokeBtn, { backgroundColor: cigBtnColor, borderColor: cigBtnBorder }]}
+              onPress={handleLogPress}
+              activeOpacity={0.8}
+            >
+              <Text style={[S.smokeBtnText, { color: cigBtnTextColor }]}>
+                {cigBtnReady ? "✅  LOG CIGARETTE" : "🚬  LOG CIGARETTE"}
+              </Text>
+              {lastCigTime && !cigBtnReady && (
+                <Text style={S.smokeBtnSub}>
+                  Last: {fmtTime(lastCigTime)} · wait {fmtCountdown(Math.max(0, nextCigSecs - secsSinceLastCig))}
+                </Text>
+              )}
+              {lastCigTime && cigBtnReady && (
+                <Text style={[S.smokeBtnSub, { color: "#86efac" }]}>
+                  Last: {fmtTime(lastCigTime)} · interval elapsed ✓
+                </Text>
+              )}
             </TouchableOpacity>
 
-            {/* Today's log */}
+            {/* Today log */}
             {todayLogs.length > 0 && (
               <View style={S.card}>
                 <View style={S.cardHeader}>
                   <Text style={S.cardTitle}>Today's log · {smokedToday} entries</Text>
-                  <TouchableOpacity onPress={removeLast}>
+                  <TouchableOpacity onPress={() => removeLast(logicalDay)}>
                     <Text style={S.removeBtn}>Remove last</Text>
                   </TouchableOpacity>
                 </View>
-                <TodayTimeline logs={todayLogs} endHour={setup.endHour} endMin={setup.endMin} />
+                <TodayTimeline
+                  logs={todayLogs}
+                  startHour={setup.startHour}
+                  startMin={setup.startMin}
+                  endHour={setup.endHour}
+                  endMin={setup.endMin}
+                />
               </View>
             )}
           </>
         ) : (
-          <StatsView logs={logs} plan={plan} setup={setup} />
+          <StatsView logs={logs} plan={plan} setup={setup} now={now} />
         )}
-
       </ScrollView>
 
-      {/* Setup Modal */}
+      {/* Day choice modal (dead zone) */}
+      <Modal visible={dayChoiceVisible} transparent animationType="fade">
+        <View style={S.choiceOverlay}>
+          <View style={S.choiceBox}>
+            <Text style={S.choiceTitle}>Which day?</Text>
+            <Text style={S.choiceSubtitle}>
+              You're between day end ({pad(setup.endHour)}:{pad(setup.endMin)}) and
+              start ({pad(setup.startHour)}:{pad(setup.startMin)}).
+            </Text>
+            <TouchableOpacity style={S.choiceBtn} onPress={() => {
+              setDayChoiceVisible(false);
+              doLog(yesterdayKey);
+            }}>
+              <Text style={S.choiceBtnText}>Add to yesterday</Text>
+              <Text style={S.choiceBtnSub}>{yesterdayKey}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[S.choiceBtn, { borderColor: "#4ade80" }]} onPress={() => {
+              setDayChoiceVisible(false);
+              doLog(todayCalKey);
+            }}>
+              <Text style={[S.choiceBtnText, { color: "#4ade80" }]}>Start today early</Text>
+              <Text style={S.choiceBtnSub}>{todayCalKey}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={S.cancelBtn} onPress={() => setDayChoiceVisible(false)}>
+              <Text style={S.cancelBtnText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Setup modal */}
       <SetupModal
         visible={showSetup}
         initial={setup}
@@ -279,47 +467,49 @@ export default function App() {
 
 // ─── Today Timeline ───────────────────────────────────────────────────────────
 
-function TodayTimeline({ logs, endHour, endMin }) {
-  const W = SW - 64, H = 70, PAD = 16;
-  const cW = W - PAD * 2;
+function TodayTimeline({ logs, startHour, startMin, endHour, endMin }) {
+  const W = SW - 64, H = 72, PAD = 16, cW = W - PAD * 2;
   const now = new Date();
-  const dayStart = new Date(now); dayStart.setHours(6, 0, 0, 0);
+
+  // Build start and end as Date objects
+  const dayStart = new Date(now); dayStart.setHours(startHour, startMin, 0, 0);
   const dayEnd = new Date(now); dayEnd.setHours(endHour, endMin, 0, 0);
+  // If end < start, end is next day
   if (dayEnd <= dayStart) dayEnd.setDate(dayEnd.getDate() + 1);
   const total = dayEnd - dayStart;
-  const xFor = (dt) => PAD + Math.max(0, Math.min(1, (new Date(dt) - dayStart) / total)) * cW;
-  const nowX = xFor(now);
+
+  const xFor = (iso) => {
+    const t = new Date(iso);
+    return PAD + Math.max(0, Math.min(1, (t - dayStart) / total)) * cW;
+  };
+  const nowX = xFor(now.toISOString());
   const dots = logs.map(iso => ({ x: xFor(iso), t: fmtTime(iso) }));
 
   return (
     <Svg width={W} height={H}>
-      {/* Track */}
-      <Rect x={PAD} y={32} width={cW} height={4} rx={2} fill="#1e1b2e" />
-      <Rect x={PAD} y={32} width={Math.max(0, nowX - PAD)} height={4} rx={2} fill="#3b2d60" />
-      {/* Now marker */}
-      <Line x1={nowX} y1={22} x2={nowX} y2={40} stroke="#a78bfa" strokeWidth={1.5} strokeDasharray="3,2" />
-      <SvgText x={nowX} y={18} textAnchor="middle" fill="#a78bfa" fontSize={9}>now</SvgText>
-      {/* Dots */}
+      <Rect x={PAD} y={34} width={cW} height={4} rx={2} fill="#1e1b2e" />
+      <Rect x={PAD} y={34} width={Math.max(0, nowX - PAD)} height={4} rx={2} fill="#3b2d60" />
+      <Line x1={nowX} y1={24} x2={nowX} y2={42} stroke="#a78bfa" strokeWidth={1.5} strokeDasharray="3,2" />
+      <SvgText x={nowX} y={20} textAnchor="middle" fill="#a78bfa" fontSize={9}>now</SvgText>
       {dots.map((d, i) => (
         <G key={i}>
-          <Circle cx={d.x} cy={34} r={6} fill="#7c3aed" />
-          <SvgText x={d.x} y={14} textAnchor="middle" fill="#d4b8ff" fontSize={8}>{d.t}</SvgText>
-          <Line x1={d.x} y1={16} x2={d.x} y2={28} stroke="#5b3fa0" strokeWidth={1} />
+          <Circle cx={d.x} cy={36} r={6} fill="#7c3aed" />
+          <SvgText x={d.x} y={15} textAnchor="middle" fill="#d4b8ff" fontSize={8}>{d.t}</SvgText>
+          <Line x1={d.x} y1={17} x2={d.x} y2={30} stroke="#5b3fa0" strokeWidth={1} />
         </G>
       ))}
-      {/* End marker */}
-      <Circle cx={PAD + cW} cy={34} r={4} fill="#2d2540" stroke="#5b3fa0" strokeWidth={1.5} />
-      <SvgText x={PAD} y={58} fill="#5e4d80" fontSize={8}>06:00</SvgText>
-      <SvgText x={PAD + cW} y={58} textAnchor="end" fill="#5e4d80" fontSize={8}>{pad(endHour)}:{pad(endMin)}</SvgText>
+      <Circle cx={PAD + cW} cy={36} r={4} fill="#2d2540" stroke="#5b3fa0" strokeWidth={1.5} />
+      <SvgText x={PAD} y={60} fill="#5e4d80" fontSize={8}>{pad(startHour)}:{pad(startMin)}</SvgText>
+      <SvgText x={PAD + cW} y={60} textAnchor="end" fill="#5e4d80" fontSize={8}>{pad(endHour)}:{pad(endMin)}</SvgText>
     </Svg>
   );
 }
 
 // ─── Stats View ───────────────────────────────────────────────────────────────
 
-function StatsView({ logs, plan, setup }) {
+function StatsView({ logs, plan, setup, now }) {
   const [chartType, setChartType] = useState("bar");
-  const week = last7Days();
+  const week = last7LogicalDays(setup);
   const wd = week.map(d => {
     const key = dateKey(d);
     return {
@@ -328,7 +518,7 @@ function StatsView({ logs, plan, setup }) {
       date: fmtDateShort(d),
       smoked: (logs[key] || []).length,
       allowance: getAllowance(plan, key, setup.startCigs),
-      isToday: key === dateKey(new Date()),
+      isToday: key === getLogicalDay(now, setup),
     };
   });
 
@@ -339,7 +529,6 @@ function StatsView({ logs, plan, setup }) {
 
   return (
     <View style={{ width: "100%" }}>
-      {/* Summary chips */}
       <View style={S.summaryRow}>
         <View style={S.summaryCard}>
           <Text style={S.summaryVal}>{totalSmoked}</Text>
@@ -358,26 +547,21 @@ function StatsView({ logs, plan, setup }) {
         </View>
       </View>
 
-      {/* Chart switcher */}
       <View style={S.card}>
         <Text style={S.cardTitle}>Last 7 days</Text>
         <View style={S.chartTabs}>
-          {["bar", "area", "heat"].map(t => (
+          {[["bar","📊 Bar"],["area","📈 Area"],["heat","🟣 Heat"]].map(([t, label]) => (
             <TouchableOpacity key={t} onPress={() => setChartType(t)}
               style={[S.chartTab, chartType === t && S.chartTabActive]}>
-              <Text style={[S.chartTabText, chartType === t && S.chartTabTextActive]}>
-                {t === "bar" ? "📊 Bar" : t === "area" ? "📈 Area" : "🟣 Heat"}
-              </Text>
+              <Text style={[S.chartTabText, chartType === t && S.chartTabTextActive]}>{label}</Text>
             </TouchableOpacity>
           ))}
         </View>
-
-        {chartType === "bar" && <WeekBarChart wd={wd} />}
+        {chartType === "bar"  && <WeekBarChart wd={wd} />}
         {chartType === "area" && <WeekAreaChart wd={wd} />}
         {chartType === "heat" && <WeekHeatmap wd={wd} />}
       </View>
 
-      {/* Day breakdown */}
       <View style={S.card}>
         <Text style={S.cardTitle}>Day breakdown</Text>
         {[...wd].reverse().map(d => {
@@ -405,220 +589,233 @@ function StatsView({ logs, plan, setup }) {
   );
 }
 
-// ─── Week Bar Chart ───────────────────────────────────────────────────────────
+// ─── Charts ───────────────────────────────────────────────────────────────────
 
 function WeekBarChart({ wd }) {
   const W = SW - 64, H = 140;
-  const PL = 28, PR = 8, PT = 20, PB = 34;
-  const cW = W - PL - PR, cH = H - PT - PB;
-  const n = wd.length, sp = cW / n, bW = sp * 0.45;
-  const mv = Math.max(...wd.map(d => Math.max(d.smoked, d.allowance)), 1);
-
+  const PL=28, PR=8, PT=20, PB=34, cW=W-PL-PR, cH=H-PT-PB;
+  const n=wd.length, sp=cW/n, bW=sp*0.45;
+  const mv=Math.max(...wd.map(d=>Math.max(d.smoked,d.allowance)),1);
   return (
     <Svg width={W} height={H}>
-      <Defs>
-        <LinearGradient id="sg" x1="0" y1="0" x2="0" y2="1">
-          <Stop offset="0%" stopColor="#7c3aed" />
-          <Stop offset="100%" stopColor="#3b2d60" />
-        </LinearGradient>
-      </Defs>
-      {[0, 0.5, 1].map(f => (
-        <Line key={f} x1={PL} y1={PT + cH * (1 - f)} x2={PL + cW} y2={PT + cH * (1 - f)} stroke="#1e1b2e" strokeWidth={1} />
+      {[0,.5,1].map(f=>(
+        <Line key={f} x1={PL} y1={PT+cH*(1-f)} x2={PL+cW} y2={PT+cH*(1-f)} stroke="#1e1b2e" strokeWidth={1}/>
       ))}
-      {wd.map((d, i) => {
-        const cx = PL + i * sp + sp / 2;
-        const aH = (d.allowance / mv) * cH;
-        const sH = (d.smoked / mv) * cH;
-        const over = d.smoked > d.allowance;
-        return (
+      {wd.map((d,i)=>{
+        const cx=PL+i*sp+sp/2, aH=(d.allowance/mv)*cH, sH=(d.smoked/mv)*cH, ov=d.smoked>d.allowance;
+        return(
           <G key={i}>
-            <Rect x={cx - bW / 2 - 2} y={PT + cH - aH} width={bW + 4} height={aH} rx={4} fill="#1e1b2e" opacity={0.9} />
-            <Rect x={cx - bW / 2} y={PT + cH - sH} width={bW} height={sH} rx={4} fill={over ? "#f87171" : "#7c3aed"} opacity={d.isToday ? 1 : 0.75} />
-            {d.smoked > 0 && <SvgText x={cx} y={PT + cH - sH - 4} textAnchor="middle" fill={over ? "#f87171" : "#a78bfa"} fontSize={10} fontWeight="bold">{d.smoked}</SvgText>}
-            <SvgText x={cx} y={H - PB + 14} textAnchor="middle" fill={d.isToday ? "#d4b8ff" : "#5e4d80"} fontSize={11} fontWeight={d.isToday ? "bold" : "normal"}>{d.day}</SvgText>
+            <Rect x={cx-bW/2-2} y={PT+cH-aH} width={bW+4} height={aH} rx={4} fill="#1e1b2e" opacity={0.9}/>
+            <Rect x={cx-bW/2} y={PT+cH-sH} width={bW} height={sH} rx={4}
+              fill={ov?"#f87171":"#7c3aed"} opacity={d.isToday?1:0.75}/>
+            {d.smoked>0&&<SvgText x={cx} y={PT+cH-sH-4} textAnchor="middle"
+              fill={ov?"#f87171":"#a78bfa"} fontSize={10} fontWeight="bold">{d.smoked}</SvgText>}
+            <SvgText x={cx} y={H-PB+14} textAnchor="middle"
+              fill={d.isToday?"#d4b8ff":"#5e4d80"} fontSize={11}
+              fontWeight={d.isToday?"bold":"normal"}>{d.day}</SvgText>
           </G>
         );
       })}
-      <Line x1={PL} y1={PT} x2={PL} y2={PT + cH} stroke="#2d2540" strokeWidth={1} />
-      <Line x1={PL} y1={PT + cH} x2={PL + cW} y2={PT + cH} stroke="#2d2540" strokeWidth={1} />
-      <SvgText x={PL - 4} y={PT + 4} textAnchor="end" fill="#5e4d80" fontSize={8}>{mv}</SvgText>
+      <Line x1={PL} y1={PT} x2={PL} y2={PT+cH} stroke="#2d2540" strokeWidth={1}/>
+      <Line x1={PL} y1={PT+cH} x2={PL+cW} y2={PT+cH} stroke="#2d2540" strokeWidth={1}/>
+      <SvgText x={PL-4} y={PT+4} textAnchor="end" fill="#5e4d80" fontSize={8}>{mv}</SvgText>
     </Svg>
   );
 }
-
-// ─── Week Area Chart ──────────────────────────────────────────────────────────
 
 function WeekAreaChart({ wd }) {
-  const W = SW - 64, H = 140;
-  const PL = 28, PR = 8, PT = 20, PB = 34;
-  const cW = W - PL - PR, cH = H - PT - PB, n = wd.length;
-  const mv = Math.max(...wd.map(d => Math.max(d.smoked, d.allowance)), 1);
-  const px = i => PL + (i / (n - 1)) * cW;
-  const py = v => PT + cH - (v / mv) * cH;
-
-  const sLine = wd.map((d, i) => `${i === 0 ? "M" : "L"}${px(i).toFixed(1)},${py(d.smoked).toFixed(1)}`).join(" ");
-  const aLine = wd.map((d, i) => `${i === 0 ? "M" : "L"}${px(i).toFixed(1)},${py(d.allowance).toFixed(1)}`).join(" ");
-  const sArea = `${sLine} L${px(n - 1)},${py(0)} L${px(0)},${py(0)} Z`;
-
+  const W=SW-64, H=140, PL=28, PR=8, PT=20, PB=34, cW=W-PL-PR, cH=H-PT-PB, n=wd.length;
+  const mv=Math.max(...wd.map(d=>Math.max(d.smoked,d.allowance)),1);
+  const px=i=>PL+(i/(n-1))*cW, py=v=>PT+cH-(v/mv)*cH;
+  const sL=wd.map((d,i)=>`${i===0?"M":"L"}${px(i).toFixed(1)},${py(d.smoked).toFixed(1)}`).join(" ");
+  const aL=wd.map((d,i)=>`${i===0?"M":"L"}${px(i).toFixed(1)},${py(d.allowance).toFixed(1)}`).join(" ");
+  const sA=`${sL} L${px(n-1)},${py(0)} L${px(0)},${py(0)} Z`;
   return (
     <Svg width={W} height={H}>
-      {[0, 0.5, 1].map(f => (
-        <Line key={f} x1={PL} y1={PT + cH * (1 - f)} x2={PL + cW} y2={PT + cH * (1 - f)} stroke="#1e1b2e" strokeWidth={1} />
+      {[0,.5,1].map(f=>(
+        <Line key={f} x1={PL} y1={PT+cH*(1-f)} x2={PL+cW} y2={PT+cH*(1-f)} stroke="#1e1b2e" strokeWidth={1}/>
       ))}
-      <Path d={sArea} fill="#7c3aed" fillOpacity={0.2} />
-      <Path d={aLine} fill="none" stroke="#2d2540" strokeWidth={1.5} strokeDasharray="4,3" />
-      <Path d={sLine} fill="none" stroke="#7c3aed" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" />
-      {wd.map((d, i) => {
-        const over = d.smoked > d.allowance;
-        return (
+      <Path d={sA} fill="#7c3aed" fillOpacity={0.2}/>
+      <Path d={aL} fill="none" stroke="#2d2540" strokeWidth={1.5} strokeDasharray="4,3"/>
+      <Path d={sL} fill="none" stroke="#7c3aed" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round"/>
+      {wd.map((d,i)=>{
+        const ov=d.smoked>d.allowance;
+        return(
           <G key={i}>
-            <Circle cx={px(i)} cy={py(d.smoked)} r={4.5} fill={over ? "#f87171" : "#7c3aed"} stroke="#0f0c1a" strokeWidth={1.5} />
-            <SvgText x={px(i)} y={py(d.smoked) - 9} textAnchor="middle" fill={over ? "#f87171" : "#d4b8ff"} fontSize={9} fontWeight="bold">{d.smoked}</SvgText>
-            <SvgText x={px(i)} y={H - PB + 14} textAnchor="middle" fill={d.isToday ? "#d4b8ff" : "#5e4d80"} fontSize={11}>{d.day}</SvgText>
+            <Circle cx={px(i)} cy={py(d.smoked)} r={4.5} fill={ov?"#f87171":"#7c3aed"} stroke="#0f0c1a" strokeWidth={1.5}/>
+            <SvgText x={px(i)} y={py(d.smoked)-9} textAnchor="middle"
+              fill={ov?"#f87171":"#d4b8ff"} fontSize={9} fontWeight="bold">{d.smoked}</SvgText>
+            <SvgText x={px(i)} y={H-PB+14} textAnchor="middle"
+              fill={d.isToday?"#d4b8ff":"#5e4d80"} fontSize={11}>{d.day}</SvgText>
           </G>
         );
       })}
-      <Line x1={PL} y1={PT} x2={PL} y2={PT + cH} stroke="#2d2540" strokeWidth={1} />
-      <Line x1={PL} y1={PT + cH} x2={PL + cW} y2={PT + cH} stroke="#2d2540" strokeWidth={1} />
-      <SvgText x={PL - 4} y={PT + 4} textAnchor="end" fill="#5e4d80" fontSize={8}>{mv}</SvgText>
+      <Line x1={PL} y1={PT} x2={PL} y2={PT+cH} stroke="#2d2540" strokeWidth={1}/>
+      <Line x1={PL} y1={PT+cH} x2={PL+cW} y2={PT+cH} stroke="#2d2540" strokeWidth={1}/>
+      <SvgText x={PL-4} y={PT+4} textAnchor="end" fill="#5e4d80" fontSize={8}>{mv}</SvgText>
     </Svg>
   );
 }
 
-// ─── Week Heatmap ─────────────────────────────────────────────────────────────
-
 function WeekHeatmap({ wd }) {
-  const W = SW - 64, H = 110;
-  const cW = W / 7, cH = 66, top = 4;
-
+  const W=SW-64, H=110, cW=W/7, cH=66, top=4;
   return (
     <Svg width={W} height={H}>
-      {wd.map((d, i) => {
-        const x = i * cW;
-        const over = d.smoked > d.allowance;
-        const noData = d.smoked === 0;
-        const ratio = d.allowance > 0 ? d.smoked / d.allowance : 0;
-        const fillOpacity = noData ? 0 : over
-          ? Math.min(0.85, 0.35 + ratio * 0.25)
-          : 0.2 + ratio * 0.7;
-        const fillColor = noData ? "#16122a" : over ? "#f87171" : "#7c3aed";
-
-        return (
+      {wd.map((d,i)=>{
+        const x=i*cW, ov=d.smoked>d.allowance, nd=d.smoked===0;
+        const r=d.allowance>0?d.smoked/d.allowance:0;
+        const op=nd?0:ov?Math.min(.85,.35+r*.25):0.2+r*.7;
+        const fc=nd?"#16122a":ov?"#f87171":"#7c3aed";
+        return(
           <G key={i}>
-            <Rect x={x + 3} y={top} width={cW - 6} height={cH} rx={10}
-              fill={fillColor} fillOpacity={fillOpacity}
-              stroke={d.isToday ? "#a78bfa" : "#1e1b2e"} strokeWidth={d.isToday ? 2 : 1} />
-            <SvgText x={x + cW / 2} y={top + 27} textAnchor="middle"
-              fill={noData ? "#3b2d60" : "#e8e0ff"} fontSize={20} fontWeight="bold">{d.smoked}</SvgText>
-            <SvgText x={x + cW / 2} y={top + 41} textAnchor="middle"
-              fill={over ? "#f87171" : "#5e4d80"} fontSize={9}>/{d.allowance}</SvgText>
-            <Circle cx={x + cW / 2} cy={top + 54} r={3.5}
-              fill={noData ? "#2d2540" : over ? "#f87171" : "#4ade80"} />
-            <SvgText x={x + cW / 2} y={top + cH + 15} textAnchor="middle"
-              fill={d.isToday ? "#d4b8ff" : "#5e4d80"} fontSize={10}>{d.day}</SvgText>
+            <Rect x={x+3} y={top} width={cW-6} height={cH} rx={10}
+              fill={fc} fillOpacity={op}
+              stroke={d.isToday?"#a78bfa":"#1e1b2e"} strokeWidth={d.isToday?2:1}/>
+            <SvgText x={x+cW/2} y={top+27} textAnchor="middle"
+              fill={nd?"#3b2d60":"#e8e0ff"} fontSize={20} fontWeight="bold">{d.smoked}</SvgText>
+            <SvgText x={x+cW/2} y={top+41} textAnchor="middle"
+              fill={ov?"#f87171":"#5e4d80"} fontSize={9}>/{d.allowance}</SvgText>
+            <Circle cx={x+cW/2} cy={top+54} r={3.5}
+              fill={nd?"#2d2540":ov?"#f87171":"#4ade80"}/>
+            <SvgText x={x+cW/2} y={top+cH+15} textAnchor="middle"
+              fill={d.isToday?"#d4b8ff":"#5e4d80"} fontSize={10}>{d.day}</SvgText>
           </G>
         );
       })}
     </Svg>
+  );
+}
+
+// ─── Time Picker Row ──────────────────────────────────────────────────────────
+// Cross-platform time picker using DateTimePicker
+
+function TimePickerRow({ label, hour, minute, onChange }) {
+  const [show, setShow] = useState(false);
+  const date = new Date();
+  date.setHours(hour, minute, 0, 0);
+
+  const handleChange = (event, selected) => {
+    if (Platform.OS === "android") setShow(false);
+    if (selected) {
+      onChange(selected.getHours(), selected.getMinutes());
+    }
+  };
+
+  return (
+    <View style={S.setupRow}>
+      <Text style={S.setupLabel}>{label}</Text>
+      <TouchableOpacity style={S.timePickerBtn} onPress={() => setShow(true)}>
+        <Text style={S.timePickerText}>{pad(hour)}:{pad(minute)}</Text>
+        <Text style={S.timePickerIcon}>🕐</Text>
+      </TouchableOpacity>
+      {show && (
+        <DateTimePicker
+          value={date}
+          mode="time"
+          is24Hour={true}
+          display={Platform.OS === "ios" ? "spinner" : "default"}
+          onChange={handleChange}
+          themeVariant="dark"
+        />
+      )}
+    </View>
   );
 }
 
 // ─── Setup Modal ──────────────────────────────────────────────────────────────
 
 function SetupModal({ visible, initial, onSave, onClose }) {
-  const [cigs, setCigs] = useState(String(initial.startCigs));
-  const [days, setDays] = useState(String(initial.durationDays));
-  const [endHour, setEndHour] = useState(String(initial.endHour));
-  const [endMin, setEndMin] = useState(String(initial.endMin));
+  const [cigs, setCigs] = useState(initial.startCigs);
+  const [days, setDays] = useState(initial.durationDays);
+  const [startHour, setStartHour] = useState(initial.startHour ?? 7);
+  const [startMin, setStartMin]   = useState(initial.startMin  ?? 0);
+  const [endHour, setEndHour]     = useState(initial.endHour   ?? 1);
+  const [endMin, setEndMin]       = useState(initial.endMin    ?? 0);
 
   useEffect(() => {
-    setCigs(String(initial.startCigs));
-    setDays(String(initial.durationDays));
-    setEndHour(String(initial.endHour));
-    setEndMin(String(initial.endMin));
+    setCigs(initial.startCigs);
+    setDays(initial.durationDays);
+    setStartHour(initial.startHour ?? 7);
+    setStartMin(initial.startMin  ?? 0);
+    setEndHour(initial.endHour   ?? 1);
+    setEndMin(initial.endMin    ?? 0);
   }, [initial]);
 
-  const intVal = (s, fallback) => { const n = parseInt(s); return isNaN(n) ? fallback : n; };
-  const intervalDays = (intVal(days, 90) / intVal(cigs, 20)).toFixed(1);
-
-  const handleSave = () => {
-    onSave({
-      startCigs: intVal(cigs, 20),
-      durationDays: intVal(days, 90),
-      endHour: intVal(endHour, 1),
-      endMin: intVal(endMin, 0),
-      startDate: initial.startDate || dateKey(new Date()),
-    });
-  };
+  const intervalDays = (days / cigs).toFixed(1);
 
   return (
     <Modal visible={visible} animationType="slide" transparent>
       <View style={S.modalOverlay}>
-        <View style={S.modalBox}>
-          <Text style={S.modalTitle}>Your Quit Plan</Text>
+        <ScrollView>
+          <View style={S.modalBox}>
+            <Text style={S.modalTitle}>Your Quit Plan</Text>
 
-          <SetupRow label="Cigarettes per day now">
-            <View style={S.stepperRow}>
-              <TouchableOpacity onPress={() => setCigs(v => String(Math.max(1, intVal(v, 20) - 1)))} style={S.stepBtn}>
-                <Text style={S.stepBtnText}>−</Text>
-              </TouchableOpacity>
-              <Text style={S.stepVal}>{cigs}</Text>
-              <TouchableOpacity onPress={() => setCigs(v => String(intVal(v, 20) + 1))} style={S.stepBtn}>
-                <Text style={S.stepBtnText}>+</Text>
-              </TouchableOpacity>
+            {/* Cigs stepper */}
+            <View style={S.setupRow}>
+              <Text style={S.setupLabel}>Cigarettes per day now</Text>
+              <View style={S.stepperRow}>
+                <TouchableOpacity onPress={() => setCigs(v => Math.max(1, v - 1))} style={S.stepBtn}>
+                  <Text style={S.stepBtnText}>−</Text>
+                </TouchableOpacity>
+                <Text style={S.stepVal}>{cigs}</Text>
+                <TouchableOpacity onPress={() => setCigs(v => v + 1)} style={S.stepBtn}>
+                  <Text style={S.stepBtnText}>+</Text>
+                </TouchableOpacity>
+              </View>
             </View>
-          </SetupRow>
 
-          <SetupRow label="Goal duration (days)">
-            <View style={S.stepperRow}>
-              <TouchableOpacity onPress={() => setDays(v => String(Math.max(7, intVal(v, 90) - 7)))} style={S.stepBtn}>
-                <Text style={S.stepBtnText}>−7</Text>
-              </TouchableOpacity>
-              <Text style={S.stepVal}>{days}d</Text>
-              <TouchableOpacity onPress={() => setDays(v => String(intVal(v, 90) + 7))} style={S.stepBtn}>
-                <Text style={S.stepBtnText}>+7</Text>
-              </TouchableOpacity>
+            {/* Days stepper */}
+            <View style={S.setupRow}>
+              <Text style={S.setupLabel}>Goal duration (days)</Text>
+              <View style={S.stepperRow}>
+                <TouchableOpacity onPress={() => setDays(v => Math.max(7, v - 7))} style={S.stepBtn}>
+                  <Text style={S.stepBtnText}>−7</Text>
+                </TouchableOpacity>
+                <Text style={S.stepVal}>{days}d</Text>
+                <TouchableOpacity onPress={() => setDays(v => v + 7)} style={S.stepBtn}>
+                  <Text style={S.stepBtnText}>+7</Text>
+                </TouchableOpacity>
+              </View>
+              <Text style={S.hint}>Reduce 1 cig every ≈{intervalDays} days</Text>
             </View>
-            <Text style={S.hint}>Reduce 1 cig every ≈{intervalDays} days</Text>
-          </SetupRow>
 
-          <SetupRow label="End of day (hour : min)">
-            <View style={S.stepperRow}>
-              <TextInput
-                style={S.timeInput} keyboardType="number-pad"
-                value={endHour} onChangeText={setEndHour} maxLength={2} placeholder="1"
-                placeholderTextColor="#5e4d80"
-              />
-              <Text style={{ color: "#5e4d80", fontSize: 24, marginHorizontal: 8 }}>:</Text>
-              <TextInput
-                style={S.timeInput} keyboardType="number-pad"
-                value={endMin} onChangeText={setEndMin} maxLength={2} placeholder="00"
-                placeholderTextColor="#5e4d80"
-              />
-            </View>
-          </SetupRow>
+            {/* Start of day time picker */}
+            <TimePickerRow
+              label="Start of day"
+              hour={startHour} minute={startMin}
+              onChange={(h, m) => { setStartHour(h); setStartMin(m); }}
+            />
 
-          <TouchableOpacity style={S.saveBtn} onPress={handleSave}>
-            <Text style={S.saveBtnText}>Save Plan</Text>
-          </TouchableOpacity>
+            {/* End of day time picker */}
+            <TimePickerRow
+              label="End of day"
+              hour={endHour} minute={endMin}
+              onChange={(h, m) => { setEndHour(h); setEndMin(m); }}
+            />
 
-          {onClose && (
-            <TouchableOpacity style={S.cancelBtn} onPress={onClose}>
-              <Text style={S.cancelBtnText}>Cancel</Text>
+            <Text style={[S.hint, { marginBottom: 8 }]}>
+              💡 If end time is before start (e.g. start 07:00, end 01:00), the day crosses midnight.
+            </Text>
+
+            <TouchableOpacity style={S.saveBtn} onPress={() => onSave({
+              startCigs: cigs,
+              durationDays: days,
+              startHour, startMin,
+              endHour, endMin,
+              startDate: initial.startDate || dateKey(new Date()),
+            })}>
+              <Text style={S.saveBtnText}>Save Plan</Text>
             </TouchableOpacity>
-          )}
-        </View>
+
+            {onClose && (
+              <TouchableOpacity style={S.cancelBtn} onPress={onClose}>
+                <Text style={S.cancelBtnText}>Cancel</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        </ScrollView>
       </View>
     </Modal>
-  );
-}
-
-function SetupRow({ label, children }) {
-  return (
-    <View style={S.setupRow}>
-      <Text style={S.setupLabel}>{label}</Text>
-      {children}
-    </View>
   );
 }
 
@@ -627,89 +824,114 @@ function SetupRow({ label, children }) {
 const S = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#0f0c1a" },
 
-  // Header
-  header: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingHorizontal: 20, paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: "#1e1b2e" },
-  logo: { color: "#e8e0ff", fontSize: 18, fontWeight: "900", letterSpacing: 0.5 },
-  headerRight: { flexDirection: "row", alignItems: "center", gap: 12 },
-  tabs: { flexDirection: "row", gap: 14 },
-  tab: { color: "#5e4d80", fontWeight: "bold", fontSize: 14 },
-  activeTab: { color: "#a78bfa" },
-  settingsBtn: { padding: 4 },
-  settingsIcon: { fontSize: 20, color: "#5e4d80" },
+  header: { flexDirection:"row", justifyContent:"space-between", alignItems:"center",
+    paddingHorizontal:20, paddingVertical:14, borderBottomWidth:1, borderBottomColor:"#1e1b2e" },
+  logo: { color:"#e8e0ff", fontSize:18, fontWeight:"900", letterSpacing:0.5 },
+  headerRight: { flexDirection:"row", alignItems:"center", gap:12 },
+  tabs: { flexDirection:"row", gap:14 },
+  tab: { color:"#5e4d80", fontWeight:"bold", fontSize:14 },
+  activeTab: { color:"#a78bfa" },
+  settingsBtn: { padding:4 },
+  settingsIcon: { fontSize:20, color:"#5e4d80" },
 
-  // Content
-  content: { padding: 20, alignItems: "center", paddingBottom: 40 },
+  content: { padding:20, alignItems:"center", paddingBottom:40 },
 
-  // Progress bar
-  progressWrap: { width: "100%", marginBottom: 8 },
-  progressLabel: { color: "#5e4d80", fontSize: 12, marginBottom: 6 },
-  progressTrack: { height: 4, backgroundColor: "#1e1b2e", borderRadius: 2, width: "100%" },
-  progressFill: { height: 4, backgroundColor: "#5b3fa0", borderRadius: 2 },
+  deadZoneBanner: { width:"100%", backgroundColor:"#1a1520", borderWidth:1,
+    borderColor:"#3b2d60", borderRadius:10, padding:10, marginBottom:12 },
+  deadZoneText: { color:"#9880cc", fontSize:12, textAlign:"center" },
 
-  // Circle
-  circleWrap: { marginVertical: 24, justifyContent: "center", alignItems: "center" },
-  circleText: { position: "absolute", alignItems: "center" },
-  countNum: { color: "#fff", fontSize: 56, fontWeight: "800", lineHeight: 60 },
-  countDen: { color: "#5e4d80", fontSize: 20, fontWeight: "400" },
-  countSub: { color: "#9880cc", fontSize: 13, marginTop: 2 },
+  progressWrap: { width:"100%", marginBottom:8 },
+  progressLabel: { color:"#5e4d80", fontSize:12, marginBottom:6 },
+  progressTrack: { height:4, backgroundColor:"#1e1b2e", borderRadius:2, width:"100%" },
+  progressFill: { height:4, backgroundColor:"#5b3fa0", borderRadius:2 },
 
-  // Status
-  statusBadge: { borderWidth: 1, borderRadius: 12, paddingHorizontal: 18, paddingVertical: 10, marginBottom: 16 },
-  statusText: { fontSize: 15, fontWeight: "700", textAlign: "center" },
+  circleWrap: { marginVertical:20, justifyContent:"center", alignItems:"center" },
+  circleText: { position:"absolute", alignItems:"center" },
+  countNum: { color:"#fff", fontSize:56, fontWeight:"800", lineHeight:60 },
+  countDen: { color:"#5e4d80", fontSize:20, fontWeight:"400" },
+  countSub: { color:"#9880cc", fontSize:13, marginTop:2 },
 
-  // Chips
-  chipsRow: { flexDirection: "row", gap: 12, width: "100%", marginBottom: 20 },
-  chip: { flex: 1, backgroundColor: "#16122a", borderWidth: 1, borderColor: "#2d2540", borderRadius: 14, padding: 14, alignItems: "center" },
-  chipVal: { color: "#e8e0ff", fontSize: 22, fontWeight: "700" },
-  chipLabel: { color: "#9880cc", fontSize: 10, marginTop: 2, letterSpacing: 0.5 },
+  statusBadge: { borderWidth:1, borderRadius:12, paddingHorizontal:18,
+    paddingVertical:10, marginBottom:16 },
+  statusText: { fontSize:15, fontWeight:"700", textAlign:"center" },
 
-  // Smoke button
-  smokeBtn: { backgroundColor: "#1e1b2e", borderWidth: 1.5, borderColor: "#5b3fa0", width: "100%", padding: 20, borderRadius: 16, alignItems: "center", marginBottom: 4 },
-  smokeBtnText: { color: "#d4b8ff", fontSize: 18, fontWeight: "800", letterSpacing: 0.5 },
+  chipsRow: { flexDirection:"row", gap:12, width:"100%", marginBottom:20 },
+  chip: { flex:1, backgroundColor:"#16122a", borderWidth:1, borderColor:"#2d2540",
+    borderRadius:14, padding:14, alignItems:"center" },
+  chipVal: { color:"#e8e0ff", fontSize:18, fontWeight:"700" },
+  chipLabel: { color:"#9880cc", fontSize:10, marginTop:2, letterSpacing:0.5 },
 
-  // Card
-  card: { backgroundColor: "#16122a", width: "100%", padding: 16, borderRadius: 20, marginTop: 16, borderWidth: 1, borderColor: "#2d2540" },
-  cardHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 12 },
-  cardTitle: { color: "#9880cc", fontSize: 13, fontWeight: "600" },
-  removeBtn: { color: "#5e4d80", fontSize: 12, textDecorationLine: "underline" },
+  smokeBtn: { width:"100%", padding:18, borderRadius:16, borderWidth:1.5,
+    alignItems:"center", marginBottom:4 },
+  smokeBtnText: { fontSize:17, fontWeight:"800", letterSpacing:0.5 },
+  smokeBtnSub: { fontSize:11, color:"#fca5a5", marginTop:4 },
 
-  // Chart tabs
-  chartTabs: { flexDirection: "row", gap: 6, marginBottom: 14, marginTop: 8 },
-  chartTab: { flex: 1, backgroundColor: "#16122a", borderWidth: 1, borderColor: "#2d2540", borderRadius: 10, padding: 8, alignItems: "center" },
-  chartTabActive: { backgroundColor: "#2d2540", borderColor: "#5b3fa0" },
-  chartTabText: { color: "#5e4d80", fontSize: 11 },
-  chartTabTextActive: { color: "#d4b8ff" },
+  card: { backgroundColor:"#16122a", width:"100%", padding:16, borderRadius:20,
+    marginTop:16, borderWidth:1, borderColor:"#2d2540" },
+  cardHeader: { flexDirection:"row", justifyContent:"space-between",
+    alignItems:"center", marginBottom:12 },
+  cardTitle: { color:"#9880cc", fontSize:13, fontWeight:"600" },
+  removeBtn: { color:"#5e4d80", fontSize:12, textDecorationLine:"underline" },
 
-  // Summary
-  summaryRow: { flexDirection: "row", gap: 8, width: "100%", marginBottom: 12 },
-  summaryCard: { flex: 1, backgroundColor: "#16122a", borderWidth: 1, borderColor: "#2d2540", borderRadius: 14, padding: 12, alignItems: "center" },
-  summaryVal: { color: "#d4b8ff", fontSize: 22, fontWeight: "800" },
-  summaryLbl: { color: "#9880cc", fontSize: 9, marginTop: 3, letterSpacing: 0.5 },
-  summarySub: { color: "#3b2d60", fontSize: 9, marginTop: 1 },
+  chartTabs: { flexDirection:"row", gap:6, marginBottom:14, marginTop:8 },
+  chartTab: { flex:1, backgroundColor:"#16122a", borderWidth:1, borderColor:"#2d2540",
+    borderRadius:10, padding:8, alignItems:"center" },
+  chartTabActive: { backgroundColor:"#2d2540", borderColor:"#5b3fa0" },
+  chartTabText: { color:"#5e4d80", fontSize:11 },
+  chartTabTextActive: { color:"#d4b8ff" },
 
-  // History rows
-  histRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: "#1e1b2e" },
-  histDay: { color: "#e8e0ff", fontSize: 15, fontWeight: "600" },
-  histDate: { color: "#5e4d80", fontSize: 12, marginTop: 1 },
-  histSmoked: { fontSize: 18, fontWeight: "700" },
-  histDiff: { color: "#5e4d80", fontSize: 11, marginTop: 1 },
+  summaryRow: { flexDirection:"row", gap:8, width:"100%", marginBottom:12 },
+  summaryCard: { flex:1, backgroundColor:"#16122a", borderWidth:1, borderColor:"#2d2540",
+    borderRadius:14, padding:12, alignItems:"center" },
+  summaryVal: { color:"#d4b8ff", fontSize:22, fontWeight:"800" },
+  summaryLbl: { color:"#9880cc", fontSize:9, marginTop:3, letterSpacing:0.5 },
+  summarySub: { color:"#3b2d60", fontSize:9, marginTop:1 },
 
-  // Modal
-  modalOverlay: { flex: 1, backgroundColor: "#000000aa", justifyContent: "flex-end" },
-  modalBox: { backgroundColor: "#16122a", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 28, borderWidth: 1, borderColor: "#2d2540" },
-  modalTitle: { color: "#e8e0ff", fontSize: 22, fontWeight: "800", marginBottom: 24, letterSpacing: -0.5 },
+  histRow: { flexDirection:"row", justifyContent:"space-between", alignItems:"center",
+    paddingVertical:10, borderBottomWidth:1, borderBottomColor:"#1e1b2e" },
+  histDay: { color:"#e8e0ff", fontSize:15, fontWeight:"600" },
+  histDate: { color:"#5e4d80", fontSize:12, marginTop:1 },
+  histSmoked: { fontSize:18, fontWeight:"700" },
+  histDiff: { color:"#5e4d80", fontSize:11, marginTop:1 },
 
-  setupRow: { marginBottom: 22 },
-  setupLabel: { color: "#9880cc", fontSize: 12, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 8 },
-  stepperRow: { flexDirection: "row", alignItems: "center", gap: 12 },
-  stepBtn: { backgroundColor: "#1e1b2e", borderWidth: 1, borderColor: "#2d2540", borderRadius: 10, width: 44, height: 44, justifyContent: "center", alignItems: "center" },
-  stepBtnText: { color: "#d4b8ff", fontSize: 18, fontWeight: "600" },
-  stepVal: { color: "#e8e0ff", fontSize: 28, fontWeight: "700", minWidth: 60, textAlign: "center" },
-  hint: { color: "#5e4d80", fontSize: 12, marginTop: 6 },
-  timeInput: { backgroundColor: "#0f0c1a", borderWidth: 1, borderColor: "#2d2540", borderRadius: 10, color: "#e8e0ff", padding: 12, fontSize: 20, width: 60, textAlign: "center", fontWeight: "700" },
+  // Day choice modal
+  choiceOverlay: { flex:1, backgroundColor:"#000000bb", justifyContent:"center",
+    paddingHorizontal:24 },
+  choiceBox: { backgroundColor:"#16122a", borderRadius:20, padding:24,
+    borderWidth:1, borderColor:"#2d2540" },
+  choiceTitle: { color:"#e8e0ff", fontSize:20, fontWeight:"800", marginBottom:8 },
+  choiceSubtitle: { color:"#9880cc", fontSize:13, marginBottom:20, lineHeight:20 },
+  choiceBtn: { borderWidth:1.5, borderColor:"#a78bfa", borderRadius:14,
+    padding:16, marginBottom:10, alignItems:"center" },
+  choiceBtnText: { color:"#a78bfa", fontSize:16, fontWeight:"700" },
+  choiceBtnSub: { color:"#5e4d80", fontSize:11, marginTop:3 },
 
-  saveBtn: { backgroundColor: "#7c3aed", borderRadius: 14, padding: 18, alignItems: "center", marginTop: 8 },
-  saveBtnText: { color: "#fff", fontSize: 17, fontWeight: "800" },
-  cancelBtn: { alignItems: "center", padding: 12, marginTop: 4 },
-  cancelBtnText: { color: "#5e4d80", fontSize: 14 },
+  // Setup modal
+  modalOverlay: { flex:1, backgroundColor:"#000000aa", justifyContent:"flex-end" },
+  modalBox: { backgroundColor:"#16122a", borderTopLeftRadius:24,
+    borderTopRightRadius:24, padding:28, borderWidth:1, borderColor:"#2d2540" },
+  modalTitle: { color:"#e8e0ff", fontSize:22, fontWeight:"800",
+    marginBottom:24, letterSpacing:-0.5 },
+
+  setupRow: { marginBottom:22 },
+  setupLabel: { color:"#9880cc", fontSize:12, textTransform:"uppercase",
+    letterSpacing:0.5, marginBottom:8 },
+  stepperRow: { flexDirection:"row", alignItems:"center", gap:12 },
+  stepBtn: { backgroundColor:"#1e1b2e", borderWidth:1, borderColor:"#2d2540",
+    borderRadius:10, width:44, height:44, justifyContent:"center", alignItems:"center" },
+  stepBtnText: { color:"#d4b8ff", fontSize:18, fontWeight:"600" },
+  stepVal: { color:"#e8e0ff", fontSize:28, fontWeight:"700", minWidth:60, textAlign:"center" },
+  hint: { color:"#5e4d80", fontSize:12, marginTop:6 },
+
+  timePickerBtn: { flexDirection:"row", alignItems:"center", backgroundColor:"#0f0c1a",
+    borderWidth:1, borderColor:"#2d2540", borderRadius:12,
+    paddingHorizontal:16, paddingVertical:12, alignSelf:"flex-start", gap:10 },
+  timePickerText: { color:"#e8e0ff", fontSize:24, fontWeight:"700", letterSpacing:2 },
+  timePickerIcon: { fontSize:18 },
+
+  saveBtn: { backgroundColor:"#7c3aed", borderRadius:14, padding:18,
+    alignItems:"center", marginTop:8 },
+  saveBtnText: { color:"#fff", fontSize:17, fontWeight:"800" },
+  cancelBtn: { alignItems:"center", padding:12, marginTop:4 },
+  cancelBtnText: { color:"#5e4d80", fontSize:14 },
 });
