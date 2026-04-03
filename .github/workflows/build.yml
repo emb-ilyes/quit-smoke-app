@@ -70,17 +70,25 @@ jobs:
           </resources>
           EOF
 
+      - name: ⚙️ Create Metro config
+        # expo prebuild does not generate metro.config.js — create it so
+        # the bundler can resolve Expo's module resolver and aliases
+        run: |
+          cat > metro.config.js << 'EOF'
+          const { getDefaultConfig } = require('expo/metro-config');
+          const config = getDefaultConfig(__dirname);
+          module.exports = config;
+          EOF
+
       - name: 📦 Bundle JavaScript into Android assets
-        # This is the step that was missing — Gradle needs the JS bundle
-        # pre-built in assets/ or it ships an empty APK that crashes on launch
         run: |
           mkdir -p android/app/src/main/assets
-          npx react-native bundle \
+          npx expo export:embed \
             --platform android \
-            --dev false \
             --entry-file node_modules/expo/AppEntry.js \
             --bundle-output android/app/src/main/assets/index.android.bundle \
-            --assets-dest android/app/src/main/res
+            --assets-dest android/app/src/main/res \
+            --dev false
 
       - name: 🔑 Make Gradle Executable
         run: chmod +x android/gradlew
@@ -88,11 +96,8 @@ jobs:
       - name: 🤖 Build Debug APK
         run: |
           cd android
-          # BUNDLE_SKIP tells the Gradle task not to re-run the bundler
-          # since we already built the bundle in the previous step
           ./gradlew assembleDebug \
-            -x bundleReleaseJsAndAssets \
-            -Pbundler.skip=true \
+            -PbundleAssets=false \
             --no-daemon \
             --stacktrace
 
