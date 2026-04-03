@@ -4,17 +4,29 @@
     "slug": "quit-smoke-app",
     "version": "2.0.0",
     "orientation": "portrait",
+    "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
-    "backgroundColor": "#0f0c1a",
     "splash": {
-      "backgroundColor": "#0f0c1a",
-      "resizeMode": "contain"
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0f0c1a"
+    },
+    "ios": {
+      "supportsTablet": true
     },
     "android": {
-      "package": "com.yourname.quitflow",
+      "package": "com.tarek.quitflow",
+      "versionCode": 1,
       "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#0f0c1a"
-      }
-    }
+      },
+      "permissions": [
+        "android.permission.VIBRATE"
+      ]
+    },
+    "plugins": [
+      "react-native-svg"
+    ]
   }
 }
