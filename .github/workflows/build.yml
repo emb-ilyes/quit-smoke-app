@@ -1,12 +1,13 @@
-name: Build Android APK
+name: Build QuitFlow APK
+
 on:
   push:
     branches: [ main ]
-  workflow_dispatch: # This allows you to start the build manually from the Actions tab
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: 🏗 Checkout Code
         uses: actions/checkout@v4
@@ -16,28 +17,39 @@ jobs:
         with:
           node-version: 18
 
-      - name: 🏗 Setup Expo
-        uses: expo/expo-github-action@v8
+      - name: ☕ Setup Java 17
+        uses: actions/setup-java@v4
         with:
-          expo-version: latest
+          distribution: temurin
+          java-version: '17'
 
       - name: 📦 Install Dependencies
         run: npm install
 
-      - name: 🗑 Clean Old Android Folder
-        run: rm -rf android
+      - name: 🗑 Clean and Prebuild Android
+        run: npx expo prebuild --platform android --clean --no-install
 
-      - name: 🔨 Build Prebuild
-        run: npx expo prebuild --platform android --clean
+      - name: 🛠 Fix Android Resources
+        run: |
+          mkdir -p android/app/src/main/res/values
+          cat > android/app/src/main/res/values/colors.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+            <color name="splashscreen_background">#0f0c1a</color>
+          </resources>
+          EOF
 
-      - name: 🤖 Build APK with Gradle
+      - name: 🔑 Make Gradle Executable
+        run: chmod +x android/gradlew
+
+      - name: 🤖 Build Debug APK
         run: |
           cd android
-          chmod +x gradlew
-          ./gradlew assembleRelease
+          ./gradlew assembleDebug --no-daemon
 
       - name: 📤 Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: quit-smoke-apk
-          path: android/app/build/outputs/apk/release/*.apk
+          name: QuitFlow-APK
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 7
