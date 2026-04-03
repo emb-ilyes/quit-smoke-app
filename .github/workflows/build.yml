@@ -33,7 +33,6 @@ jobs:
         run: |
           mkdir -p android/app/src/main/res/values
 
-          # Full colors.xml — covers every color referenced by Expo's generated styles
           cat > android/app/src/main/res/values/colors.xml << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <resources>
@@ -53,7 +52,6 @@ jobs:
           </resources>
           EOF
 
-          # styles.xml — ensures AppTheme and SplashTheme are defined
           cat > android/app/src/main/res/values/styles.xml << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <resources>
@@ -72,13 +70,31 @@ jobs:
           </resources>
           EOF
 
+      - name: 📦 Bundle JavaScript into Android assets
+        # This is the step that was missing — Gradle needs the JS bundle
+        # pre-built in assets/ or it ships an empty APK that crashes on launch
+        run: |
+          mkdir -p android/app/src/main/assets
+          npx react-native bundle \
+            --platform android \
+            --dev false \
+            --entry-file node_modules/expo/AppEntry.js \
+            --bundle-output android/app/src/main/assets/index.android.bundle \
+            --assets-dest android/app/src/main/res
+
       - name: 🔑 Make Gradle Executable
         run: chmod +x android/gradlew
 
       - name: 🤖 Build Debug APK
         run: |
           cd android
-          ./gradlew assembleDebug --no-daemon --stacktrace
+          # BUNDLE_SKIP tells the Gradle task not to re-run the bundler
+          # since we already built the bundle in the previous step
+          ./gradlew assembleDebug \
+            -x bundleReleaseJsAndAssets \
+            -Pbundler.skip=true \
+            --no-daemon \
+            --stacktrace
 
       - name: 📤 Upload APK
         uses: actions/upload-artifact@v4
