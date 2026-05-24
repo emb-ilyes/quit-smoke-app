@@ -1,0 +1,10 @@
+node_modules/
+.expo/
+android/
+ios/
+*.jks
+*.p8
+*.p12
+*.key
+web-build/
+.env

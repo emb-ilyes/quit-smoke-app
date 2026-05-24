@@ -11,9 +11,7 @@
       "resizeMode": "contain",
       "backgroundColor": "#0f0c1a"
     },
-    "ios": {
-      "supportsTablet": true
-    },
+    "ios": { "supportsTablet": true },
     "android": {
       "package": "com.tarek.quitflow",
       "versionCode": 1,
@@ -21,12 +19,7 @@
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#0f0c1a"
       },
-      "permissions": [
-        "android.permission.VIBRATE"
-      ]
-    },
-    "plugins": [
-      "react-native-svg"
-    ]
+      "permissions": ["android.permission.VIBRATE"]
+    }
   }
 }
